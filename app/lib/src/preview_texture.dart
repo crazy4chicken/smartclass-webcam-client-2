@@ -25,7 +25,11 @@ class PreviewTexture {
   /// Whether this platform paints frames itself: where the plugin and the capture path both live.
   /// Everywhere else the stream path is the preview.
   static bool get available =>
-      Platform.isMacOS || Platform.isIOS || Platform.isLinux || Platform.isWindows;
+      Platform.isMacOS ||
+      Platform.isIOS ||
+      Platform.isLinux ||
+      Platform.isWindows ||
+      Platform.isAndroid;
 
   /// Whether the platform's texture paints the camera's own buffer, so the capture path produces no
   /// frames at all while it shows.
@@ -34,6 +38,11 @@ class PreviewTexture {
   /// Flutter. False on Linux and Windows, where the texture paints the scaled RGBA frame the capture
   /// path published for it — that frame is the stream path's own work, so the layout size keeps
   /// reaching the pipeline there.
+  ///
+  /// False on Android too, and worth saying why: the camera renders straight into the interface's
+  /// texture there, so no frame is converted at all — but a camera that refuses that output
+  /// previews from the stream instead, and the layout size has to keep reaching the capture path
+  /// or that fallback would have no box to render into.
   static bool get paintsPlatformBuffer => Platform.isMacOS || Platform.isIOS;
 
   /// Registers a texture and starts publishing frames into it, answering its id — or `null` when
@@ -77,6 +86,36 @@ class PreviewTexture {
         return null;
       }
       return (width, height);
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  /// The clockwise quarter turns the interface still has to turn the platform's picture by: 0,
+  /// 1, 2 or 3, or `null` while the platform does not paint or has not answered yet.
+  ///
+  /// Zero on Android, and that is not an oversight: the camera renders into a `SurfaceTexture`,
+  /// and the engine samples that texture with the buffer's own transform matrix, which already
+  /// accounts for the sensor's orientation — the picture arrives upright. Turning it here as
+  /// well is what makes a portrait preview show a landscape picture: the correction is applied
+  /// twice, and the second one is a quarter turn clockwise that has nothing to correct.
+  ///
+  /// The platform still reports the sensor's own orientation through `rotation`, and it is worth
+  /// reading in a log: a device whose camera service does not fill that transform matrix in is a
+  /// device on which this has to be the sensor's quarter turns instead of zero.
+  static Future<int?> quarterTurns() async {
+    if (!available) {
+      return null;
+    }
+    if (Platform.isAndroid) {
+      return 0;
+    }
+    try {
+      final degrees = await _channel.invokeMethod<int>('rotation');
+      if (degrees == null) return null;
+      return (degrees ~/ 90) % 4;
     } on PlatformException {
       return null;
     } on MissingPluginException {

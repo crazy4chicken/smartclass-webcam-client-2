@@ -1,6 +1,7 @@
 # Agent tooling
 .orca/
 .omp/
+.workbuddy-ai/
 
 # E2E harness cache (downloaded server source/binary, PostgreSQL, run state, media)
 .cache/
@@ -130,3 +131,8 @@ dist/
 .env
 .env.*
 !.env.example
+
+# The cross-compile toolchain the local host names. `.cargo/config.toml` holds absolute NDK
+# paths (per-machine) and `.cargo/config.toml.example` is its template; CI names the toolchain
+# through the environment instead — see the android job in build.yml. Nothing here ships.
+.cargo/

@@ -7,7 +7,10 @@ plugins {
 android {
     namespace = "com.example.app"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // Pinned rather than `flutter.ndkVersion`: the CI job installs exactly this NDK, and the
+    // two have to agree or the APK build fails there for a reason no code change explains. It
+    // also means a Flutter SDK upgrade that moves its own default cannot turn a green build red.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

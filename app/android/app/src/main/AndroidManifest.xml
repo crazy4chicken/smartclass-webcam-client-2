@@ -1,4 +1,25 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The client's whole job is the camera: the capture backend calls
+         ACameraManager_openCamera, which Android refuses without this permission. It is
+         requested at runtime before the first use (see MainActivity's permission channel);
+         declaring it here is only the other half of the grant. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- The client is a network client: registration, the device WebSocket and the media that
+         rides on it. Flutter's template declares `INTERNET` only in the `debug` and `profile`
+         manifests (it is there for the tool's hot reload), which a release build never merges —
+         so without this line a release APK would be a process outside the `inet` group and
+         every socket call would fail with EPERM, against a device that looks correctly
+         registered. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- A classroom device has a camera, and the platform prefers to know: without required="true"
+         the app is still installable on a device that has none, where `list-cameras` reports
+         the absence instead of the install being refused. -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
     <application
         android:label="SC Webcam"
         android:name="${applicationName}"

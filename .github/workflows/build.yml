@@ -2,7 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    # main carries every platform; only-android is the branch the Android preview is developed
+    # on, and a push there is exactly when "does it still build" matters.
+    branches: [main, only-android]
   pull_request:
   workflow_dispatch:
 
@@ -111,6 +113,98 @@ jobs:
         run: flutter build macos --debug
         working-directory: app
 
-  # TODO(android): add the Android capture backend (Camera2 + MediaCodec) first,
-  # then extend this workflow with an aarch64-linux-android cargo check and a
-  # `flutter build apk --debug` step in the apple job (or a dedicated job).
+  android:
+    # The Android preview now drives a texture the camera renders into, which makes this branch's
+    # own platform the one that has to build on every push: the Rust capture crate for the real
+    # target — the only way the three `ANativeWindow_*` symbols are proven to resolve, because
+    # `cargo check` does not link — and the Flutter APK, which compiles that same crate into
+    # librust_lib.so. Both fail independently, so both are checked.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The toolchain is named by this job, not carried in the repo: `.cargo/config.toml` is a
+      # local template of absolute NDK paths (see `.cargo/config.toml.example`) and is gitignored,
+      # so a developer's copy is not honoured here even when it exists on the runner.
+      - name: Install Rust (stable + android target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android
+
+      # The runner image carries no Android SDK, so the toolchain this job names is installed
+      # here: the NDK the app pins in app/build.gradle.kts, plus the platform and build-tools the
+      # APK build needs. Everything lands under $HOME, so no sudo and no third-party action.
+      - name: Install the Android SDK components
+        run: |
+          set -euo pipefail
+          sdk="$HOME/android-sdk"
+          ndk="${ANDROID_NDK_VERSION:-28.2.13676358}"
+          mkdir -p "$sdk/cmdline-tools"
+          curl -sSfL -o /tmp/cmdline-tools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          rm -rf /tmp/cmdline-tools-extract
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extract
+          rm -rf "$sdk/cmdline-tools/latest"
+          mv /tmp/cmdline-tools-extract/cmdline-tools "$sdk/cmdline-tools/latest"
+          sdkmanager="$sdk/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --sdk_root="$sdk" --licenses > /dev/null || true
+          "$sdkmanager" --sdk_root="$sdk" \
+            "ndk;${ndk}" platform-tools "platforms;android-36" "build-tools;36.0.0"
+          {
+            echo "ANDROID_HOME=$sdk"
+            echo "ANDROID_SDK_ROOT=$sdk"
+            echo "ANDROID_NDK_ROOT=$sdk/ndk/${ndk}"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache the Android SDK
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/android-sdk
+          key: android-sdk-${{ runner.os }}-v1-ndk28.2.13676358
+
+      - name: Point the cross toolchain at this runner's NDK
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          # The per-ABI wrappers have no fixup that makes them runnable from cargo on Linux, so
+          # the generic drivers get the target as a flag instead — the same thing the local
+          # Windows template does, with this platform's paths.
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${ndk}/clang++" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=--target=aarch64-linux-android21" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${ndk}/clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${ndk}/llvm-ar" >> "$GITHUB_ENV"
+          echo "CFLAGS_aarch64_linux_android=--target=aarch64-linux-android21" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+
+      - name: Check the capture crate (aarch64-linux-android)
+        run: cargo check -p scwc-capture --target aarch64-linux-android --locked
+
+      - name: Install VAAPI (the host tests link against it)
+        # The workspace's examples and the capture crate's own Linux backend link `-lva` and
+        # `-lva-drm` when they are built for a Linux host, which is what a host test run builds.
+        # The linux-windows job installs the same package for the same reason.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libva-dev
+
+      - name: Unit tests (Linux host)
+        run: cargo test --workspace --exclude scwc-e2e --locked
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      # The cargokit build of librust_lib.so is the link step for the three symbols the check
+      # above cannot prove: if `-landroid` is ever dropped, this is where it fails.
+      - name: Build the debug APK
+        working-directory: app
+        run: flutter build apk --debug
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scwc-client-${{ github.sha }}-android-debug.apk
+          path: app/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error

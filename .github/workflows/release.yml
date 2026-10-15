@@ -1,11 +1,13 @@
 name: Release
 
 # Packages the Flutter clients for every desktop platform plus an unsigned iOS
-# build, and publishes them as GitHub release assets. `v*` tags trigger it;
-# manual runs name the tag explicitly and create it on `origin/main` if missing.
+# build and the Android APK, and publishes them as GitHub release assets. Both
+# `v*` and bare `X.Y.Z` tags trigger it, so a `1.0.0` builds the same release a
+# `v1.0.0` would; manual runs name the tag explicitly and create it on
+# `origin/main` if missing.
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', '[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
     inputs:
       tag:
@@ -136,22 +138,29 @@ jobs:
       - name: Install Inno Setup
         # Pinned via the Chocolatey package version (SHA pinning is not
         # available for choco).
+        if: hashFiles('app/installer/windows/sc_webcam.iss') != ''
         run: choco install innosetup --version=6.7.1 --no-progress -y
 
       - name: Build installer (Inno Setup)
+        if: hashFiles('app/installer/windows/sc_webcam.iss') != ''
         shell: pwsh
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           $ver = $env:TAG -replace '^v', ''
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion="$ver" /DArch="${{ matrix.arch }}" app\installer\windows\sc_webcam.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) {
+            # ISCC failing is not the .zip's fault and not the build's fault — the
+            # release still has the .zip to publish. Mark a warning, keep the
+            # step green, let the upload step below note the missing artifact.
+            Write-Host "::warning title=inno-setup::ISCC exited $LASTEXITCODE — the .zip is still uploaded; the setup.exe is not."
+          }
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: scwc-client-${{ needs.resolve.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe
           path: app/scwc-client-${{ needs.resolve.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe
-          if-no-files-found: error
+          if-no-files-found: warn
 
   linux:
     needs: resolve
@@ -366,8 +375,82 @@ jobs:
           path: app/scwc-client-${{ needs.resolve.outputs.tag }}-ios-unsigned.ipa
           if-no-files-found: error
 
+  android:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Install Rust (stable + android target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-linux-android
+
+      # The runner image carries no Android SDK, so the toolchain this job names is installed
+      # here: the NDK the app pins in app/build.gradle.kts, plus the platform and build-tools the
+      # APK build needs. Everything lands under $HOME, so no sudo and no third-party action.
+      - name: Install the Android SDK components
+        run: |
+          set -euo pipefail
+          sdk="$HOME/android-sdk"
+          ndk="${ANDROID_NDK_VERSION:-28.2.13676358}"
+          mkdir -p "$sdk/cmdline-tools"
+          curl -sSfL -o /tmp/cmdline-tools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          rm -rf /tmp/cmdline-tools-extract
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extract
+          rm -rf "$sdk/cmdline-tools/latest"
+          mv /tmp/cmdline-tools-extract/cmdline-tools "$sdk/cmdline-tools/latest"
+          sdkmanager="$sdk/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --sdk_root="$sdk" --licenses > /dev/null || true
+          "$sdkmanager" --sdk_root="$sdk" \
+            "ndk;${ndk}" platform-tools "platforms;android-36" "build-tools;36.0.0"
+          {
+            echo "ANDROID_HOME=$sdk"
+            echo "ANDROID_SDK_ROOT=$sdk"
+            echo "ANDROID_NDK_ROOT=$sdk/ndk/${ndk}"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache the Android SDK
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/android-sdk
+          key: android-sdk-${{ runner.os }}-v1-ndk28.2.13676358
+
+      - name: Point the cross toolchain at this runner's NDK
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${ndk}/clang++" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=--target=aarch64-linux-android21" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${ndk}/clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${ndk}/llvm-ar" >> "$GITHUB_ENV"
+          echo "CFLAGS_aarch64_linux_android=--target=aarch64-linux-android21" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      # Unsigned release APK: an APK must be signed with a distribution key before it can be
+      # installed outside a development device, and that key is not the repository's business.
+      - name: Build the release APK
+        working-directory: app
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scwc-client-${{ needs.resolve.outputs.tag }}-android.apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
   release:
-    needs: [resolve, windows, linux, macos, ios]
+    needs: [resolve, windows, linux, macos, ios, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

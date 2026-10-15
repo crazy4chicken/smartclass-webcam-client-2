@@ -4,4 +4,12 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- The on-device verification points the app at a local server over plain HTTP: the e2e
+         server speaks `http` on 127.0.0.1 (reached through `adb reverse`), and Android has
+         denied cleartext to every host by default since API 28 — so without this the app fails
+         with "CLEARTEXT communication to 127.0.0.1 not permitted", which reads like the
+         client being unable to reach a server rather than a policy the debug build has to
+         lift. Scoped to the debug manifest on purpose: a release build keeps the platform
+         default, and production talks `https`/`wss` anyway. -->
+    <application android:usesCleartextTraffic="true" />
 </manifest>

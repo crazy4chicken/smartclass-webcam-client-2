@@ -114,11 +114,19 @@ class _PreviewViewState extends State<PreviewView> {
                 if (ratio == null) {
                   return SizedBox.expand(child: Texture(textureId: textureId));
                 }
+                // `RotatedBox` rather than `Transform`: a transform paints the child turned but
+                // leaves its layout size alone, so a sensor that lies on its side would keep a
+                // landscape box. Rotating the box swaps the constraints it passes down and the
+                // size it reports, so the `AspectRatio` below is measured against the turned
+                // picture — which is the one on screen.
                 return SizedBox.expand(
                   child: Center(
-                    child: AspectRatio(
-                      aspectRatio: ratio,
-                      child: Texture(textureId: textureId),
+                    child: RotatedBox(
+                      quarterTurns: widget.preview.textureQuarterTurns,
+                      child: AspectRatio(
+                        aspectRatio: ratio,
+                        child: Texture(textureId: textureId),
+                      ),
                     ),
                   ),
                 );

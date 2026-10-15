@@ -39,13 +39,27 @@ android {
     // (e.g. ndkVersion "23.1.7779620")
     ndkVersion android.ndkVersion
 
+    // 17, not 1.8: the Kotlin plugin's default jvm target is the toolchain's own (21 here), and
+    // AGP fails the build outright when the Java and Kotlin tasks disagree. The app module is on
+    // 17 as well, so the two compile against the same bytecode level.
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     defaultConfig {
         minSdkVersion 19
+    }
+}
+
+// The Kotlin plugin is applied by Flutter's plugin loader rather than by this script
+// (android.builtInKotlin=false), so the block is registered for whenever it lands — and runs at
+// once if it already has.
+plugins.withId('org.jetbrains.kotlin.android') {
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        }
     }
 }
 

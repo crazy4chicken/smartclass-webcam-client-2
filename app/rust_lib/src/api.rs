@@ -870,7 +870,10 @@ const WARN_TARGETS: [&str; 3] = ["scwc_core", "scwc_capture", "scwc_protocol"];
 impl<S: Subscriber> Layer<S> for WarnLayer {
     fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
         let metadata = event.metadata();
-        if *metadata.level() < Level::WARN {
+        // tracing orders its levels by verbosity, not by severity — `DEBUG > INFO > WARN > ERROR`
+        // — so "at least a warning" is `>=`, and the `<` this used to be let every info and
+        // debug record through to the operator as a warning.
+        if *metadata.level() > Level::WARN {
             return;
         }
         if !WARN_TARGETS

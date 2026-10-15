@@ -92,9 +92,23 @@ mod tests {
             format_rfc3339_nano(base + Duration::from_millis(123)),
             "2023-11-14T22:13:20.123Z"
         );
+        // The fractions below are whole multiples of 100 ns on purpose: `SystemTime` carries
+        // 100 ns granularity on Windows (FILETIME), so a value that is not a multiple of it
+        // does not survive the round trip through one there — it comes back as 123_456_700,
+        // and the trailing zeros this test is about are then the platform's, not the
+        // formatter's. Multiples of 100 ns format identically on every host.
         assert_eq!(
-            format_rfc3339_nano(base + Duration::new(0, 123_456_789)),
-            "2023-11-14T22:13:20.123456789Z"
+            format_rfc3339_nano(base + Duration::new(0, 100_000_000)),
+            "2023-11-14T22:13:20.1Z"
+        );
+        assert_eq!(
+            format_rfc3339_nano(base + Duration::new(0, 123_456_000)),
+            "2023-11-14T22:13:20.123456Z"
+        );
+        // A fraction whose last digit is not zero is not trimmed at all.
+        assert_eq!(
+            format_rfc3339_nano(base + Duration::new(0, 123_456_700)),
+            "2023-11-14T22:13:20.1234567Z"
         );
     }
 }

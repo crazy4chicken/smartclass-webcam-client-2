@@ -204,6 +204,93 @@ mod pixel_buffer_texture {
     }
 }
 
+/// The surface path: the Android preview plugin hands the camera its own texture to render into.
+///
+/// The same shape as the two paths above and the same glue — a C ABI rather than the bridge,
+/// because the plugin runs in this process — with one difference that is the whole point: the
+/// only thing that ever crosses is a `Surface`, handed over once when the engine attaches. The
+/// camera then renders into the texture with every capture request, so the preview costs no
+/// conversion, no copy and no per-frame notice at all: the embedding engine owns the texture and
+/// the listener that tells it a newer frame is waiting.
+///
+/// The names are JNI's, for `com.flutter_rust_bridge.rust_lib.ScwcPreviewPlugin`; every `_` of a
+/// package or class name becomes `_1` in the mangled symbol, so a class or package that moves
+/// renames every function below.
+#[cfg(target_os = "android")]
+mod surface_preview {
+    use std::ffi::c_void;
+
+    /// Hands the plugin's `Surface` over as the window the camera previews into.
+    ///
+    /// Called once, when the engine attaches. A window that was handed over before loses its
+    /// reference here; a stream that leased it keeps rendering into it until it is torn down.
+    ///
+    /// # Safety
+    ///
+    /// `env` is this call's `JNIEnv*` and `surface` a live `android.view.Surface` reference; both
+    /// are used for the duration of this call alone.
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_com_flutter_1rust_1bridge_rust_1lib_ScwcPreviewPlugin_nativeAttachSurface(
+        env: *mut c_void,
+        _this: *mut c_void,
+        surface: *mut c_void,
+    ) {
+        // SAFETY: the plugin called this from a JNI method that owns both arguments for this call.
+        unsafe { scwc_capture::preview_attach_surface(env, surface) };
+    }
+
+    /// Gives the window back: nothing is previewed into it, and the next stream that is built
+    /// previews from a YUV reader of its own.
+    #[no_mangle]
+    pub extern "C" fn Java_com_flutter_1rust_1bridge_rust_1lib_ScwcPreviewPlugin_nativeDetachSurface(
+        _env: *mut c_void,
+        _this: *mut c_void,
+    ) {
+        scwc_capture::preview_detach_surface();
+    }
+
+    /// Whether the camera is rendering into that window right now.
+    ///
+    /// `false` means the interface's texture is not the picture: a camera that refused the output
+    /// combination previews from a reader, and the plugin has to say so rather than hand out an
+    /// id for a black box.
+    #[no_mangle]
+    pub extern "C" fn Java_com_flutter_1rust_1bridge_rust_1lib_ScwcPreviewPlugin_nativePreviewActive(
+        _env: *mut c_void,
+        _this: *mut c_void,
+    ) -> u8 {
+        u8::from(scwc_capture::preview_external_active())
+    }
+
+    /// The pixel size the camera renders into the window as `width << 32 | height`, or 0 while
+    /// none is known yet.
+    ///
+    /// Packed rather than answered as an array because answering with one would mean calling back
+    /// into JNI to build it, for two numbers.
+    #[no_mangle]
+    pub extern "C" fn Java_com_flutter_1rust_1bridge_rust_1lib_ScwcPreviewPlugin_nativePreviewSize(
+        _env: *mut c_void,
+        _this: *mut c_void,
+    ) -> i64 {
+        match scwc_capture::preview_size_pixels() {
+            Some((width, height)) => (i64::from(width) << 32) | i64::from(height),
+            None => 0,
+        }
+    }
+
+    /// The clockwise degrees the picture has to be turned by to stand up: 0, 90, 180 or 270.
+    ///
+    /// A sensor's orientation is a property of the camera and not of its buffers, so the
+    /// interface is told it rather than reading it out of a frame.
+    #[no_mangle]
+    pub extern "C" fn Java_com_flutter_1rust_1bridge_rust_1lib_ScwcPreviewPlugin_nativePreviewRotation(
+        _env: *mut c_void,
+        _this: *mut c_void,
+    ) -> i32 {
+        i32::from(scwc_capture::preview_rotation_degrees())
+    }
+}
+
 /// Installs the process-wide rustls crypto provider the `wss://` attach needs.
 ///
 /// rustls 0.23 builds a TLS configuration only when it can tell which crypto provider to use,

@@ -636,6 +636,15 @@ class AgentState extends ChangeNotifier {
       ):
         // The core has the last word on what the camera runs, so the staged selection is measured
         // against this rather than against what it was asked for.
+        //
+        // A new resolution rebuilds the capture pipeline — a capture session's outputs are fixed
+        // when it is built — so the picture the preview is showing belongs to the one that is
+        // going away: a texture the camera rendered into at the old geometry, or the frames a
+        // reader of it produced. The picture therefore has to be taken again, from the pipeline
+        // this switch brought up, which is what the epoch is for.
+        if (_liveParams?.resolution != resolution) {
+          _previewEpoch++;
+        }
         _liveParams = CaptureParams(
           resolution: resolution,
           fps: fps,

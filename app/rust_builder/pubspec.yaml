@@ -21,9 +21,13 @@ dev_dependencies:
 
 flutter:
   plugin:
+    # `ffiPlugin` stays: this is also the crate the bridge loads, and the two are not exclusive —
+    # the plugin class below is the preview's own channel, the FFI is the bridge's.
     platforms:
       android:
         ffiPlugin: true
+        package: com.flutter_rust_bridge.rust_lib
+        pluginClass: ScwcPreviewPlugin
       ios:
         pluginClass: ScwcPreviewPlugin
       linux:

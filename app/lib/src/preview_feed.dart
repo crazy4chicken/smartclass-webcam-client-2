@@ -57,12 +57,22 @@ class PreviewFeed extends ChangeNotifier {
   /// configured resolution.
   double? _sourceRatio;
 
+  /// Clockwise quarter turns the platform's picture needs to stand up, or 0 while it needs none.
+  ///
+  /// A camera whose sensor is mounted sideways writes a picture that lies on its side, and the
+  /// orientation is a property of the camera, not of a frame — so the platform is asked for it
+  /// once, alongside the shape above, and the interface turns the whole texture by it.
+  int _quarterTurns = 0;
+
   /// The newest frame of the pipeline the feed follows, or null while there is none to show.
   ui.Image? get image => _image;
 
   /// The platform's own texture the picture is painted from, or null while the frame stream is what
   /// the picture comes from.
   int? get textureId => _textureId;
+
+  /// Clockwise quarter turns to turn that texture's picture by, so it stands up.
+  int get textureQuarterTurns => _quarterTurns;
 
   /// Width over height of that texture's picture, or null while its shape is not known at all.
   ///
@@ -192,16 +202,23 @@ class PreviewFeed extends ChangeNotifier {
     unawaited(_measureSource(id));
   }
 
-  /// Asks the platform for the shape of the picture it paints, which is what the texture is
-  /// letterboxed by.
+  /// Asks the platform for the shape of the picture it paints — and for the turn it needs to stand
+  /// up — which is what the texture is letterboxed and turned by.
   ///
   /// The buffer's own size is the truth about it, and it is only there once a frame has been
   /// captured, so the question is asked again a few times; until it answers, the resolution the
-  /// capture path was asked for paints the picture.
+  /// capture path was asked for paints the picture. The turn is a property of the camera and is
+  /// answered whether a frame has been captured or not, so it is taken from the first pass that
+  /// gets one.
   Future<void> _measureSource(int textureId) async {
     for (var attempt = 0; attempt < 20; attempt++) {
       final size = await PreviewTexture.size();
+      final turns = await PreviewTexture.quarterTurns();
       if (_disposed || _textureId != textureId) return;
+      if (turns != null && turns != _quarterTurns) {
+        _quarterTurns = turns;
+        notifyListeners();
+      }
       if (size != null) {
         _sourceRatio = size.$1 / size.$2;
         notifyListeners();
@@ -216,6 +233,7 @@ class PreviewFeed extends ChangeNotifier {
   void _forgetTexture() {
     _textureId = null;
     _textureEpoch = -1;
+    _quarterTurns = 0;
     notifyListeners();
   }
 

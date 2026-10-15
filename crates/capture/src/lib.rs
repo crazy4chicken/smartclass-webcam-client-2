@@ -23,7 +23,19 @@
 //!   compiled. Hardware encoders (NVENC, Quick Sync, AMF) are preferred and the inbox
 //!   software H.264 encoder is the loud fallback. See the `windows` module for the
 //!   behaviours that hardware testing still has to confirm.
-//! - **Everything else** (Android among them): [`enumerate_cameras`] and [`open`] fail with
+//! - **Android**: the Camera2 NDK for capture and `AMediaCodec` for encoding, both reached
+//!   through hand-written FFI like the Linux backend, so no shim is compiled either.
+//!   Enumeration reports each camera's real capability matrix, and the media path carries
+//!   `switch_camera` rebuilds and stills through a JPEG reader. Streaming (up to 4K60, with
+//!   the frame cadence verified while media flows), `switch_camera` and `take_photo` are
+//!   verified on hardware through the Flutter shell; a sustained wall-clock rate is not — the
+//!   run was minutes, not a soak. Thermal step-down is not built: the plan asks for it,
+//!   nothing in this backend measures heat, and the configured bitrate stands until an
+//!   operator changes it. The `CAMERA` permission is held per process on this platform: an
+//!   installed app gets it from the user, while a native binary run from `adb shell` is at the
+//!   mercy of the vendor's own policy, which on one vendor's devices means its camera HAL
+//!   aborts on such a client's first request (the `android` module records that).
+//! - **Everything else**: [`enumerate_cameras`] and [`open`] fail with
 //!   [`CaptureError::Os`]; the crate still compiles so that the rest of the workspace can
 //!   be built and tested on any host.
 //!
@@ -43,9 +55,10 @@
 //! - **Orientation**: frames are handed on as the sensor produces them. Nothing in this
 //!   crate rotates them to the interface orientation — that is the app layer's job, since
 //!   the protocol carries no rotation field to describe it in.
-//! - **Thermal pressure**: state transitions are logged, and the protocol's answer to heat
-//!   is an encoder bitrate reduction (never a change of resolution or frame rate), which the
-//!   core owns.
+//! - **Thermal pressure**: state transitions are logged, and that is all — no backend in this
+//!   client retargets the encoder, so the configured bitrate stands until an operator changes
+//!   it (never a change of resolution or frame rate, which the protocol reserves for
+//!   `switch_camera`).
 //! - **Interruptions**: a session that a phone call or another client takes away is logged
 //!   and restarted once the interruption ends.
 //!
@@ -97,6 +110,7 @@
 
 #![warn(missing_docs)]
 
+mod camera_matrix;
 mod error;
 mod source;
 
@@ -115,18 +129,25 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as sys;
 
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+use android as sys;
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "linux",
-    target_os = "windows"
+    target_os = "windows",
+    target_os = "android"
 )))]
 mod unsupported;
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "linux",
-    target_os = "windows"
+    target_os = "windows",
+    target_os = "android"
 )))]
 use unsupported as sys;
 
@@ -134,6 +155,18 @@ pub use crate::error::CaptureError;
 pub use crate::source::{CaptureSource, open};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use crate::source::{release_frame_buffer, retain_frame_buffer};
+/// The interface's own preview window, on the one platform that has one.
+///
+/// On Android the embedding application can hand a `Surface` over for the camera to render into,
+/// which is what makes a preview cost nothing per frame; these are the entry points its plugin
+/// calls. The window is a native object, so it stays in the Android module rather than in the
+/// core: nothing outside this crate names it.
+#[cfg(target_os = "android")]
+pub use crate::android::preview_surface::{
+    active as preview_external_active, attach as preview_attach_surface,
+    detach as preview_detach_surface, rotation as preview_rotation_degrees,
+    size as preview_size_pixels,
+};
 
 /// Lists the cameras of the host.
 ///

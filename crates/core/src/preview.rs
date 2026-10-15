@@ -6,7 +6,9 @@
 //! next frame and calls [`publish_bgra`] with it, and the frame is converted to RGBA and scaled
 //! *aspect-locked inside* the requested size right here, so the frames themselves carry no
 //! letterboxing and the consumer only has to centre what it gets. Everything on that path is
-//! converted and copied, so it suits the consumers that cannot take a platform buffer.
+//! converted and copied, so it suits the consumers that cannot take a platform buffer — unless
+//! the producer renders the frame itself, converted and already at the right size, and calls
+//! [`publish_rgba`]: then the only pass over those pixels is the producer's own.
 //!
 //! The other path takes the platform's own buffer ([`publish_native_frame`],
 //! [`set_native_frame_listener`]) and is what a renderer that understands it wants: the newest
@@ -181,7 +183,37 @@ pub fn preview_frame_consumed() {
     arm();
 }
 
-/// Converts one captured frame and offers it to the consumer.
+/// Routes one finished frame to whichever consumer is registered.
+///
+/// Shared by [`publish_bgra`] and [`publish_rgba`]: once the pixels are in the layout the
+/// consumer wants the routing is the same — the pixel-buffer texture wins while one is
+/// registered, the channel is unbounded, and a frame a texture never took is handed back to
+/// the consumer to free. The permit is the caller's to take before it produces the pixels;
+/// here a frame simply goes out, or is dropped where a consumer that left receives nothing.
+fn publish_converted_frame(frame: PreviewFrame) {
+    let texture = rgba_preview_active();
+    let sink = if texture {
+        None
+    } else {
+        sink_slot().as_ref().cloned()
+    };
+    if sink.is_none() && !texture {
+        return;
+    }
+    if texture {
+        if let Some(replaced) = publish_rgba_frame(frame) {
+            // A frame the texture never took: the slot kept it, and the consumer is what frees it.
+            release_rgba_frame(replaced);
+        }
+        return;
+    }
+    // The channel is unbounded, so this only fails once the consumer is gone.
+    if let Some(sender) = sink {
+        let _ = sender.send(frame);
+    }
+}
+
+/// Converts one captured BGRA frame and offers it to the consumer.
 ///
 /// `pixels` is the frame as the backend hands it over: tightly packed BGRA, four bytes per
 /// pixel, row-major, `width * height` of them. The frame is scaled aspect-locked into the
@@ -194,7 +226,9 @@ pub fn preview_frame_consumed() {
 /// cheaper one.
 ///
 /// Does nothing while no frame may be produced — see [`next_frame_size`] — which is what lets a
-/// producer call this unconditionally.
+/// producer call this unconditionally. A backend that can render the frame itself, already
+/// converted and already at the size [`next_frame_size`] names, calls [`publish_rgba`] instead
+/// and pays for no second pass over every pixel.
 pub fn publish_bgra(pixels: &[u8], width: u32, height: u32) {
     let Some((target_width, target_height)) = target_size() else {
         return;
@@ -202,19 +236,11 @@ pub fn publish_bgra(pixels: &[u8], width: u32, height: u32) {
     let Some(source) = Bgra::new(pixels, width, height) else {
         return;
     };
-    // Read before the conversion, so nothing is produced for a texture that went away — and the
-    // sink is only looked at when the texture is not the consumer, so its lock is never taken on
-    // the texture path.
-    let texture = rgba_preview_active();
-    let sink = if texture {
-        None
-    } else {
-        // Cloned out of the slot before the conversion, so the lock is held only long enough to
-        // look: a caller that stops listening (the sink was replaced, or the run ended) neither
-        // waits for a frame being converted nor pays for one it will never see.
-        sink_slot().as_ref().cloned()
-    };
-    if sink.is_none() && !texture {
+    // Looked at before the conversion, so a caller that stops listening (the sink was
+    // replaced, or the run ended) neither waits for a frame being converted nor pays for one
+    // it will never see; the sender itself is looked up again by the routing, which is where
+    // the frame actually goes.
+    if sink_slot().is_none() && !rgba_preview_active() {
         return;
     }
     // The frame is a frame, so it takes the consumer's permit — and gives it back only when the
@@ -225,23 +251,48 @@ pub fn publish_bgra(pixels: &[u8], width: u32, height: u32) {
     }
 
     let (out_width, out_height) = fit(source.width, source.height, target_width, target_height);
-    let rgba = source.scale_to(out_width, out_height);
     let frame = PreviewFrame {
-        rgba,
+        rgba: source.scale_to(out_width, out_height),
         width: out_width,
         height: out_height,
     };
-    if texture {
-        if let Some(replaced) = publish_rgba_frame(frame) {
-            // A frame the texture never took: the slot kept it, and the consumer is what frees it.
-            release_rgba_frame(replaced);
-        }
-        return;
+    publish_converted_frame(frame);
+}
+
+/// Offers one already-converted RGBA frame to the consumer.
+///
+/// `rgba` is row-major RGBA, four bytes per pixel, no row padding, `width` x `height` of them —
+/// the layout [`PreviewFrame`] carries, so the pixels move exactly once, from the producer's
+/// buffer into the frame that goes out. Nothing here converts, rescales or letterboxes: a
+/// producer that renders the frame itself at the size [`next_frame_size`] names — a fused
+/// colour conversion, a scaled hardware path — hands the finished picture over, and the
+/// consumer sees the frame [`publish_bgra`] would have produced minus the second pass.
+///
+/// The same permit, the same consumers and the same drop policy as [`publish_bgra`] apply.
+/// `false` means no frame may be produced now — no target box, a geometry that does not
+/// describe its pixels, no consumer, or a consumer that has not reported the frame it was
+/// handed — and nothing is copied for one.
+pub fn publish_rgba(rgba: &[u8], width: u32, height: u32) -> bool {
+    if target_size().is_none() {
+        return false;
     }
-    // The channel is unbounded, so this only fails once the consumer is gone.
-    if let Some(sender) = sink {
-        let _ = sender.send(frame);
+    let needed = usize::try_from(u64::from(width) * u64::from(height) * 4).ok();
+    if width == 0 || height == 0 || needed != Some(rgba.len()) {
+        return false;
     }
+    if sink_slot().is_none() && !rgba_preview_active() {
+        return false;
+    }
+    if !consume_permit() {
+        return false;
+    }
+    let frame = PreviewFrame {
+        rgba: rgba.to_vec(),
+        width,
+        height,
+    };
+    publish_converted_frame(frame);
+    true
 }
 
 /// Registers the consumer told when a new native frame is published; `None` stops it.
@@ -475,8 +526,8 @@ fn sink_slot() -> MutexGuard<'static, Option<UnboundedSender<PreviewFrame>>> {
 mod tests {
     use super::{
         fit, native_frame, native_preview_active, next_frame_size, preview_enabled,
-        preview_frame_consumed, publish_bgra, publish_native_frame, rgba_preview_active,
-        set_native_frame_listener, set_preview_sink, set_preview_target_size,
+        preview_frame_consumed, publish_bgra, publish_native_frame, publish_rgba,
+        rgba_preview_active, set_native_frame_listener, set_preview_sink, set_preview_target_size,
         set_rgba_frame_listener, take_native_frame, take_rgba_frame, PreviewFrame,
         RgbaFrameConsumer,
     };
@@ -530,6 +581,30 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_is_fitted_for_the_shape_it_is_shown_in() {
+        // The Android backend turns its sensor's frame before showing it, and a quarter turn
+        // swaps the source's sides: a 1280x720 landscape frame is a 720x1280 portrait picture.
+        // The backend therefore fits the *shown* shape, so the size it renders at is already
+        // the final one and fitting it again — which is what a second pass would do — is the
+        // same size. Regression guard: fitting the un-turned shape first and rotating the
+        // result afterwards leaves a frame that no longer matches the box, and a producer
+        // that re-fits it then rescales every pixel a second time, into a picture nobody
+        // asked to be any larger.
+        let _guard = exclusive();
+        let mut frames = preview(1176, 1645);
+        assert_eq!(next_frame_size(720, 1280), Some((925, 1645)));
+
+        let rgba = vec![0u8; 925 * 1645 * 4];
+        assert!(publish_rgba(&rgba, 925, 1645));
+        let frame = frames.try_recv().expect("the frame the producer made");
+        assert_eq!(
+            (frame.width, frame.height),
+            (925, 1645),
+            "the frame goes out at the size it was produced at"
+        );
+    }
+
+    #[test]
     fn a_published_frame_arrives_scaled_and_swapped_to_rgba() {
         let _guard = exclusive();
         // 4x2 BGRA, one distinct colour per column, so the swap is visible in every pixel.
@@ -549,6 +624,47 @@ mod tests {
         assert_eq!(frame.rgba.len(), 8 * 4 * 4);
         // The first source pixel is B=10, G=20, R=30; RGBA wants it the other way around.
         assert_eq!(&frame.rgba[0..4], &[30, 20, 10, u8::MAX]);
+    }
+
+    #[test]
+    fn an_already_converted_frame_goes_out_untouched() {
+        let _guard = exclusive();
+        let mut frames = preview(8, 8);
+
+        // A producer that rendered the frame itself hands over exactly the pixels it made, at
+        // exactly the size it made them at: no second pass, no re-fit, no re-scale.
+        let rgba: Vec<u8> = (0..(8 * 4 * 4)).map(|i| i as u8).collect();
+        assert!(publish_rgba(&rgba, 8, 4));
+
+        let frame = frames.try_recv().expect("one frame was offered");
+        assert_eq!((frame.width, frame.height), (8, 4), "the frame keeps the size it was given");
+        assert_eq!(frame.rgba, rgba, "the pixels move once and land unmodified");
+
+        // The same pacing the BGRA path answers to: nothing goes out while the permit is out.
+        assert!(!publish_rgba(&rgba, 8, 4), "the consumer holds the frame it was given");
+        preview_frame_consumed();
+        assert!(publish_rgba(&rgba, 8, 4));
+        assert!(frames.try_recv().is_ok());
+    }
+
+    #[test]
+    fn an_already_converted_frame_is_refused_without_a_consumer_or_a_box() {
+        let _guard = exclusive();
+        set_preview_target_size(0, 0);
+        let rgba = [0u8; 8 * 4 * 4];
+        assert!(!publish_rgba(&rgba, 8, 4), "no box, no frame");
+
+        // A sender that is dropped at once: the point is that a texture-less, sink-less preview
+        // is no consumer, whichever way the frame arrives.
+        let (_sender, _receiver) = tokio::sync::mpsc::unbounded_channel::<PreviewFrame>();
+        set_preview_target_size(8, 8);
+        // No sink and no texture is no consumer, whatever the frame is.
+        assert!(!publish_rgba(&rgba, 8, 4), "no consumer, no frame");
+        // A geometry that does not describe its pixels is not a frame.
+        let mut frames = preview(8, 8);
+        assert!(!publish_rgba(&[0u8; 15], 8, 4));
+        assert!(!publish_rgba(&rgba, 0, 4));
+        assert!(frames.try_recv().is_err(), "nothing went out");
     }
 
     #[test]
